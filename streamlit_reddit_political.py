@@ -145,8 +145,12 @@ else:
     model_path = os.path.join(model_dir, selected_model)
     model, vectorizer = load_traditional_model(model_path)
 
+# Initialize session state for text input
+if 'text_input' not in st.session_state:
+    st.session_state.text_input = ""
+
 # Text input
-text_input = st.text_area("Enter Reddit post text:", height=150)
+text_input = st.text_area("Enter Reddit post text:", value=st.session_state.text_input, height=150)
 
 # Add example texts
 st.markdown("### Or try one of these examples:")
@@ -162,9 +166,7 @@ cols = st.columns(2)
 for i, example in enumerate(example_texts):
     col_idx = i % 2
     if cols[col_idx].button(f"Example {i+1}", key=f"ex_{i}"):
-        text_input = example
         st.session_state.text_input = example
-        # Need to rerun to update the text area
         st.rerun()
 
 # Make prediction when button is clicked
