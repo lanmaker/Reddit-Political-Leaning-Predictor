@@ -5,6 +5,9 @@ import torch
 import joblib
 import os
 import re
+import requests
+import io
+import tempfile
 from transformers import DistilBertTokenizer, DistilBertForSequenceClassification
 
 # Set page config for better appearance
@@ -20,7 +23,23 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 model_dir = os.path.join(script_dir, "models")
 distilbert_dir = os.path.join(model_dir, "distilbert_model")
 vectorizer_path = os.path.join(model_dir, "tfidf_vectorizer.pkl")
-best_model_path = os.path.join(model_dir, "logistic_regression.pkl")  # or whatever your best model was
+
+# GitHub repo details
+GITHUB_USERNAME = "lanmaker"  
+GITHUB_REPO = "Reddit-Political-Leaning-Predictor"  
+GITHUB_BRANCH = "main"  
+
+# Function to get file from GitHub
+def download_file_from_github(filename):
+    github_url = f"https://raw.githubusercontent.com/{GITHUB_USERNAME}/{GITHUB_REPO}/{GITHUB_BRANCH}/{filename}"
+    response = requests.get(github_url)
+    if response.status_code == 200:
+        return response.content
+    else:
+        raise Exception(f"Failed to download {filename} from GitHub: {response.status_code}")
+
+# Check if running in Streamlit Cloud
+is_streamlit_cloud = os.getenv("STREAMLIT_SHARING") or os.getenv("STREAMLIT_CLOUD")
 
 # Define preprocessing function
 def preprocess_text(text):
@@ -39,9 +58,6 @@ def preprocess_text(text):
 # Load the model based on user selection
 @st.cache_resource
 def load_distilbert_model():
-    # Check if we're running in Streamlit Cloud
-    is_streamlit_cloud = os.getenv("STREAMLIT_SHARING") or os.getenv("STREAMLIT_CLOUD")
-    
     if is_streamlit_cloud:
         # When in Streamlit Cloud, directly download from Hugging Face
         st.info("Loading DistilBERT model from Hugging Face Hub (this may take a moment)...")
@@ -70,10 +86,34 @@ def load_distilbert_model():
     return model, tokenizer, preprocessing_info
 
 @st.cache_resource
-def load_traditional_model(model_path):
-    model = joblib.load(model_path)
-    vectorizer = joblib.load(vectorizer_path)
-    return model, vectorizer
+def load_traditional_model(model_filename):
+    if is_streamlit_cloud:
+        try:
+            # Download model file from GitHub
+            st.info(f"Downloading {model_filename} from GitHub...")
+            model_content = download_file_from_github(model_filename)
+            
+            # Load model from binary content
+            model = joblib.load(io.BytesIO(model_content))
+            
+            # Download vectorizer if not already done
+            if not hasattr(load_traditional_model, 'vectorizer'):
+                vectorizer_content = download_file_from_github("tfidf_vectorizer.pkl")
+                vectorizer = joblib.load(io.BytesIO(vectorizer_content))
+                load_traditional_model.vectorizer = vectorizer
+            else:
+                vectorizer = load_traditional_model.vectorizer
+                
+            return model, vectorizer
+        except Exception as e:
+            st.error(f"Error loading model from GitHub: {str(e)}")
+            raise e
+    else:
+        # Local environment
+        model_path = os.path.join(model_dir, model_filename)
+        model = joblib.load(model_path)
+        vectorizer = joblib.load(vectorizer_path)
+        return model, vectorizer
 
 # Prediction functions
 def predict_with_distilbert(text, model, tokenizer, max_length):
@@ -161,14 +201,28 @@ if model_type == "DistilBERT (Transformer)":
     max_length = preprocessing_info.get('max_length', 128)
 else:
     # For Traditional ML, let user select which model to use
-    traditional_model_files = [f for f in os.listdir(model_dir) if f.endswith('.pkl') and not f.startswith('tfidf')]
+    if is_streamlit_cloud:
+        # List of models available in GitHub repo
+        traditional_model_files = [
+            "logistic_regression.pkl",
+            "linear_svm.pkl",
+            "multinomial_naive_bayes.pkl",
+            "random_forest.pkl",
+            "ensemble.pkl",
+            "smote_+_logistic_regression.pkl",
+            "smote_+_random_forest.pkl"
+        ]
+    else:
+        # Local model files
+        traditional_model_files = [f for f in os.listdir(model_dir) if f.endswith('.pkl') and not f.startswith('tfidf')]
+    
     selected_model = st.sidebar.selectbox(
         "Select Traditional Model:",
         traditional_model_files,
         format_func=lambda x: x.replace('_', ' ').replace('.pkl', '').title()
     )
-    model_path = os.path.join(model_dir, selected_model)
-    model, vectorizer = load_traditional_model(model_path)
+    
+    model, vectorizer = load_traditional_model(selected_model)
 
 # Initialize session state for text input
 if 'text_input' not in st.session_state:
