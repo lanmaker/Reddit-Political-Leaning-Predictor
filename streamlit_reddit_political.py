@@ -39,9 +39,34 @@ def preprocess_text(text):
 # Load the model based on user selection
 @st.cache_resource
 def load_distilbert_model():
-    tokenizer = DistilBertTokenizer.from_pretrained(distilbert_dir)
-    model = DistilBertForSequenceClassification.from_pretrained(distilbert_dir)
-    preprocessing_info = joblib.load(os.path.join(distilbert_dir, 'preprocessing_info.pkl'))
+    # Check if we're running in Streamlit Cloud
+    is_streamlit_cloud = os.getenv("STREAMLIT_SHARING") or os.getenv("STREAMLIT_CLOUD")
+    
+    if is_streamlit_cloud:
+        # When in Streamlit Cloud, directly download from Hugging Face
+        st.info("Loading DistilBERT model from Hugging Face Hub (this may take a moment)...")
+        model_name = "distilbert-base-uncased"
+        tokenizer = DistilBertTokenizer.from_pretrained(model_name)
+        model = DistilBertForSequenceClassification.from_pretrained(model_name, num_labels=2)
+        preprocessing_info = {'max_length': 128}  # Default preprocessing info
+        print(f"Downloaded DistilBERT model from Hugging Face Hub: {model_name}")
+    else:
+        # Local environment - try to load from local directory first
+        try:
+            tokenizer = DistilBertTokenizer.from_pretrained(distilbert_dir)
+            model = DistilBertForSequenceClassification.from_pretrained(distilbert_dir)
+            preprocessing_info = joblib.load(os.path.join(distilbert_dir, 'preprocessing_info.pkl'))
+            print("Loaded DistilBERT model from local directory")
+        except Exception as e:
+            # If local loading fails, download from Hugging Face Hub
+            st.warning(f"Failed to load local model: {str(e)}")
+            st.info("Loading DistilBERT model from Hugging Face Hub (this may take a moment)...")
+            model_name = "distilbert-base-uncased"
+            tokenizer = DistilBertTokenizer.from_pretrained(model_name)
+            model = DistilBertForSequenceClassification.from_pretrained(model_name, num_labels=2)
+            preprocessing_info = {'max_length': 128}  # Default preprocessing info
+            print(f"Downloaded DistilBERT model from Hugging Face Hub: {model_name}")
+    
     return model, tokenizer, preprocessing_info
 
 @st.cache_resource
