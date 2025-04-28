@@ -8,6 +8,7 @@ import re
 import requests
 import io
 import tempfile
+import time
 from transformers import DistilBertTokenizer, DistilBertForSequenceClassification
 
 # Set page config for better appearance
@@ -47,11 +48,44 @@ GITHUB_BRANCH = "main"
 # Function to get file from GitHub
 def download_file_from_github(filename):
     github_url = f"https://raw.githubusercontent.com/{GITHUB_USERNAME}/{GITHUB_REPO}/{GITHUB_BRANCH}/{filename}"
-    response = requests.get(github_url)
-    if response.status_code == 200:
-        return response.content
-    else:
-        raise Exception(f"Failed to download {filename} from GitHub: {response.status_code}")
+    st.info(f"Downloading from: {github_url}")
+    
+    # Add a retry mechanism
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(github_url)
+            if response.status_code == 200:
+                content_size = len(response.content)
+                st.success(f"Downloaded {filename} ({content_size} bytes)")
+                
+                # Basic validation for pkl files
+                if filename.endswith('.pkl'):
+                    try:
+                        # Try to load the model to verify it's valid
+                        model_obj = joblib.load(io.BytesIO(response.content))
+                        if hasattr(model_obj, '__class__'):
+                            st.success(f"Successfully validated {filename} as {model_obj.__class__.__name__}")
+                        return response.content
+                    except Exception as e:
+                        st.error(f"Downloaded file appears to be invalid: {str(e)}")
+                        raise Exception(f"Invalid model file: {str(e)}")
+                return response.content
+            else:
+                st.warning(f"Failed to download {filename}: HTTP {response.status_code}")
+                if attempt < max_retries - 1:
+                    st.info(f"Retrying download (attempt {attempt+2}/{max_retries})...")
+                    time.sleep(1)  # Wait a bit before retrying
+                else:
+                    raise Exception(f"Failed to download {filename} after {max_retries} attempts: {response.status_code}")
+        except Exception as e:
+            if attempt < max_retries - 1:
+                st.warning(f"Error during download: {str(e)}. Retrying...")
+                time.sleep(1)
+            else:
+                raise Exception(f"Failed to download {filename}: {str(e)}")
+                
+    raise Exception(f"Failed to download {filename} after {max_retries} attempts")
 
 # Define preprocessing function
 def preprocess_text(text):
@@ -117,23 +151,35 @@ def load_distilbert_model():
 def load_traditional_model(model_filename):
     if is_streamlit_cloud:
         try:
-            # Download model file from GitHub
+            # First, ensure we have a working vectorizer before loading any models
+            if not hasattr(load_traditional_model, 'vectorizer'):
+                st.info("Downloading vectorizer from GitHub first...")
+                try:
+                    vectorizer_content = download_file_from_github("tfidf_vectorizer.pkl")
+                    vectorizer = joblib.load(io.BytesIO(vectorizer_content))
+                    
+                    # Validate vectorizer works by trying a simple transform
+                    _ = vectorizer.transform(["test vectorizer"])
+                    st.success("Vectorizer validated successfully!")
+                    
+                    # Cache the vectorizer for future use
+                    load_traditional_model.vectorizer = vectorizer
+                except Exception as e:
+                    st.error(f"Vectorizer validation failed: {str(e)}")
+                    st.warning("Creating a new vectorizer instead...")
+                    vectorizer = create_new_vectorizer()
+                    load_traditional_model.vectorizer = vectorizer
+            else:
+                vectorizer = load_traditional_model.vectorizer
+                
+            # Now download and load the model
             st.info(f"Downloading {model_filename} from GitHub...")
             model_content = download_file_from_github(model_filename)
             
             # Load model from binary content
             model = joblib.load(io.BytesIO(model_content))
             
-            # Download vectorizer if not already done
-            if not hasattr(load_traditional_model, 'vectorizer'):
-                st.info("Downloading vectorizer from GitHub...")
-                vectorizer_content = download_file_from_github("tfidf_vectorizer.pkl")
-                vectorizer = joblib.load(io.BytesIO(vectorizer_content))
-                load_traditional_model.vectorizer = vectorizer
-            else:
-                vectorizer = load_traditional_model.vectorizer
-            
-            # Verify model is properly fitted
+            # Verify model is properly fitted by testing a prediction
             verify_model(model, vectorizer)
                 
             return model, vectorizer
@@ -141,7 +187,7 @@ def load_traditional_model(model_filename):
             st.error(f"Error loading model from GitHub: {str(e)}")
             # Fallback to a simple LogisticRegression model
             st.warning("Using a simple fallback model instead.")
-            return create_fallback_model(vectorizer=None)
+            return create_fallback_model(vectorizer=load_traditional_model.vectorizer if hasattr(load_traditional_model, 'vectorizer') else None)
     else:
         # Local environment
         try:
@@ -158,21 +204,70 @@ def load_traditional_model(model_filename):
             # Fallback to a simple LogisticRegression model
             st.warning("Using a simple fallback model instead.")
             return create_fallback_model(vectorizer)
+            
+def create_new_vectorizer():
+    """Create a new TF-IDF vectorizer with basic political text content"""
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    
+    st.info("Creating new TF-IDF vectorizer from scratch...")
+    vectorizer = TfidfVectorizer(max_features=5000)
+    # Create some diverse political texts to fit the vectorizer
+    texts = [
+        "conservative right wing republican freedom liberty constitution america patriot",
+        "liberal left wing democrat equality diversity inclusion progressive rights",
+        "taxes economy jobs government regulation business market freedom capitalism",
+        "healthcare education climate welfare social security immigration reform",
+        "military defense border security law enforcement police states rights",
+        "abortion gun control environment civil rights voting equality justice"
+    ]
+    vectorizer.fit(texts)
+    st.success("New vectorizer created and fitted successfully")
+    return vectorizer
 
 def verify_model(model, vectorizer):
     """Verify that the model is properly fitted by attempting a simple prediction"""
     try:
+        # Display model type
+        model_type = type(model).__name__
+        st.info(f"Verifying {model_type} model...")
+        
         # Create a simple sample
-        sample_text = "This is a test message"
+        sample_text = "this is a test message for political classification"
+        
+        # Check if vectorizer transforms work
+        st.info("Testing vectorizer transformation...")
         X = vectorizer.transform([sample_text])
+        st.success(f"Vectorizer transform successful: shape {X.shape}")
         
         # Try predicting
-        _ = model.predict(X)
+        st.info("Testing model prediction...")
+        
+        # Check for fitted attributes
+        if hasattr(model, 'coef_') and model.coef_ is not None:
+            st.success("Model appears to be properly fitted (has coef_ attribute)")
+        elif hasattr(model, 'feature_importances_') and model.feature_importances_ is not None:
+            st.success("Model appears to be properly fitted (has feature_importances_ attribute)")
+        
+        # Try actual prediction
+        prediction = model.predict(X)
+        st.success(f"Prediction successful: {prediction[0]}")
+        
+        # Try prediction probability if available
+        if hasattr(model, 'predict_proba'):
+            probs = model.predict_proba(X)
+            st.success(f"Probability prediction successful: {probs[0]}")
         
         # If we got here, the model is likely good
         return True
     except Exception as e:
         st.error(f"Model verification failed: {str(e)}")
+        # Show more details about the model to help debug
+        st.error("Model details:")
+        for attr in ['fit', 'predict', 'classes_', 'n_features_in_']:
+            if hasattr(model, attr):
+                st.info(f"- Has '{attr}' attribute/method")
+            else:
+                st.warning(f"- Missing '{attr}' attribute/method")
         raise e
 
 def create_fallback_model(vectorizer=None):
