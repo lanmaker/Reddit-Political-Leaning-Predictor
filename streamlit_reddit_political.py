@@ -20,9 +20,24 @@ st.set_page_config(
 
 # Define paths
 script_dir = os.path.dirname(os.path.abspath(__file__))
-model_dir = os.path.join(script_dir, "models")
-distilbert_dir = os.path.join(model_dir, "distilbert_model")
-vectorizer_path = os.path.join(model_dir, "tfidf_vectorizer.pkl")
+
+# Improved detection of Streamlit Cloud environment
+is_streamlit_cloud = os.getenv("STREAMLIT_SHARING") or os.getenv("STREAMLIT_CLOUD") or os.getenv("IS_STREAMLIT_CLOUD")
+# Additional check - typically Streamlit Cloud has this path
+if not is_streamlit_cloud and os.path.exists("/mount/src"):
+    is_streamlit_cloud = True
+
+# Define paths conditionally
+if not is_streamlit_cloud:
+    # Only use local directories when not in cloud
+    model_dir = os.path.join(script_dir, "models")
+    distilbert_dir = os.path.join(model_dir, "distilbert_model")
+    vectorizer_path = os.path.join(model_dir, "tfidf_vectorizer.pkl")
+else:
+    # Placeholder paths for cloud deployment (won't be directly accessed)
+    model_dir = None
+    distilbert_dir = None
+    vectorizer_path = None
 
 # GitHub repo details
 GITHUB_USERNAME = "lanmaker"  
@@ -37,9 +52,6 @@ def download_file_from_github(filename):
         return response.content
     else:
         raise Exception(f"Failed to download {filename} from GitHub: {response.status_code}")
-
-# Check if running in Streamlit Cloud
-is_streamlit_cloud = os.getenv("STREAMLIT_SHARING") or os.getenv("STREAMLIT_CLOUD")
 
 # Define preprocessing function
 def preprocess_text(text):
@@ -201,20 +213,30 @@ if model_type == "DistilBERT (Transformer)":
     max_length = preprocessing_info.get('max_length', 128)
 else:
     # For Traditional ML, let user select which model to use
+    # Always define default models list as fallback
+    default_model_files = [
+        "logistic_regression.pkl",
+        "linear_svm.pkl",
+        "multinomial_naive_bayes.pkl",
+        "random_forest.pkl",
+        "ensemble.pkl",
+        "smote_+_logistic_regression.pkl",
+        "smote_+_random_forest.pkl"
+    ]
+    
     if is_streamlit_cloud:
-        # List of models available in GitHub repo
-        traditional_model_files = [
-            "logistic_regression.pkl",
-            "linear_svm.pkl",
-            "multinomial_naive_bayes.pkl",
-            "random_forest.pkl",
-            "ensemble.pkl",
-            "smote_+_logistic_regression.pkl",
-            "smote_+_random_forest.pkl"
-        ]
+        # When in cloud, use the predefined list
+        traditional_model_files = default_model_files
     else:
-        # Local model files
-        traditional_model_files = [f for f in os.listdir(model_dir) if f.endswith('.pkl') and not f.startswith('tfidf')]
+        # Only try to access local directory when not in cloud
+        try:
+            traditional_model_files = [f for f in os.listdir(model_dir) if f.endswith('.pkl') and not f.startswith('tfidf')]
+            if not traditional_model_files:  # If directory exists but empty
+                st.warning("No model files found in local directory. Using default model list.")
+                traditional_model_files = default_model_files
+        except (FileNotFoundError, TypeError):
+            st.warning("Could not access local model directory. Using default model list.")
+            traditional_model_files = default_model_files
     
     selected_model = st.sidebar.selectbox(
         "Select Traditional Model:",
