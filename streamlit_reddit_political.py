@@ -141,6 +141,16 @@ st.markdown("""
         font-size: 1.3rem !important;
         margin-bottom: 15px !important;
     }
+    .processing-text {
+        text-align: center;
+        color: #666;
+        margin: 10px 0;
+    }
+    .loader-container {
+        display: flex;
+        justify-content: center;
+        margin: 20px 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -767,6 +777,3 @@ st.markdown("""
     <p class="credit-tag">Created with machine learning & Streamlit</p>
 </div>
 """, unsafe_allow_html=True) 
-
-
-
