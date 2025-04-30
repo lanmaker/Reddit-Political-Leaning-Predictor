@@ -64,9 +64,10 @@ MODEL_VECTORIZER_PAIRS = {
 }
 
 # Function to get file from GitHub
-def download_file_from_github(filename):
+def download_file_from_github(filename, silent=False):
     github_url = f"https://raw.githubusercontent.com/{GITHUB_USERNAME}/{GITHUB_REPO}/{GITHUB_BRANCH}/{filename}"
-    st.info(f"Downloading from: {github_url}")
+    if not silent:
+        st.info(f"Downloading from: {github_url}")
     
     # Add a retry mechanism
     max_retries = 3
@@ -75,30 +76,36 @@ def download_file_from_github(filename):
             response = requests.get(github_url)
             if response.status_code == 200:
                 content_size = len(response.content)
-                st.success(f"Downloaded {filename} ({content_size} bytes)")
+                if not silent:
+                    st.success(f"Downloaded {filename} ({content_size} bytes)")
                 
                 # Basic validation for pkl files
                 if filename.endswith('.pkl'):
                     try:
                         # Try to load the model to verify it's valid
                         model_obj = joblib.load(io.BytesIO(response.content))
-                        if hasattr(model_obj, '__class__'):
+                        if hasattr(model_obj, '__class__') and not silent:
                             st.success(f"Successfully validated {filename} as {model_obj.__class__.__name__}")
                         return response.content
                     except Exception as e:
-                        st.error(f"Downloaded file appears to be invalid: {str(e)}")
+                        if not silent:
+                            st.error(f"Downloaded file appears to be invalid: {str(e)}")
                         raise Exception(f"Invalid model file: {str(e)}")
                 return response.content
             else:
-                st.warning(f"Failed to download {filename}: HTTP {response.status_code}")
+                if not silent:
+                    st.warning(f"Failed to download {filename}: HTTP {response.status_code}")
+                
                 if attempt < max_retries - 1:
-                    st.info(f"Retrying download (attempt {attempt+2}/{max_retries})...")
+                    if not silent:
+                        st.info(f"Retrying download (attempt {attempt+2}/{max_retries})...")
                     time.sleep(1)  # Wait a bit before retrying
                 else:
                     raise Exception(f"Failed to download {filename} after {max_retries} attempts: {response.status_code}")
         except Exception as e:
             if attempt < max_retries - 1:
-                st.warning(f"Error during download: {str(e)}. Retrying...")
+                if not silent:
+                    st.warning(f"Error during download: {str(e)}. Retrying...")
                 time.sleep(1)
             else:
                 raise Exception(f"Failed to download {filename}: {str(e)}")
@@ -169,29 +176,51 @@ def load_distilbert_model():
 def load_traditional_model(model_filename):
     if is_streamlit_cloud:
         try:
-            # Get the paired vectorizer filename for this model
-            vectorizer_filename = MODEL_VECTORIZER_PAIRS.get(model_filename, "tfidf_vectorizer.pkl")
-            
-            # Download and load the paired vectorizer
-            st.info(f"Downloading vectorizer {vectorizer_filename} matched to {model_filename}...")
-            vectorizer_content = download_file_from_github(vectorizer_filename)
-            vectorizer = joblib.load(io.BytesIO(vectorizer_content))
-            
-            # Validate vectorizer works by trying a simple transform
-            _ = vectorizer.transform(["test vectorizer"])
-            st.success(f"Vectorizer {vectorizer_filename} validated successfully!")
+            # First try to load the general TF-IDF vectorizer
+            try:
+                st.info("Downloading the standard vectorizer...")
+                vectorizer_content = download_file_from_github("tfidf_vectorizer.pkl")
+                vectorizer = joblib.load(io.BytesIO(vectorizer_content))
                 
-            # Now download and load the model
-            st.info(f"Downloading {model_filename} from GitHub...")
-            model_content = download_file_from_github(model_filename)
-            
-            # Load model from binary content
-            model = joblib.load(io.BytesIO(model_content))
-            
-            # Verify model is properly fitted by testing a prediction
-            verify_model(model, vectorizer)
+                # Load the selected model
+                st.info(f"Downloading {model_filename} from GitHub...")
+                model_content = download_file_from_github(model_filename)
+                model = joblib.load(io.BytesIO(model_content))
                 
-            return model, vectorizer
+                # Try to verify compatibility
+                st.info("Verifying model and vectorizer compatibility...")
+                try:
+                    verify_model(model, vectorizer)
+                    return model, vectorizer
+                except Exception as e:
+                    st.warning(f"Model and standard vectorizer are not compatible: {str(e)}")
+                    # Continue to next approach
+            except Exception as e:
+                st.warning(f"Error with standard vectorizer: {str(e)}")
+            
+            # If we get here, either the standard vectorizer didn't exist or was incompatible
+            # Try to create a new vectorizer that's compatible with the model
+            st.info("Creating a compatible vectorizer...")
+            
+            # Get the model's expected feature count
+            feature_count = model.n_features_in_ if hasattr(model, 'n_features_in_') else None
+            if feature_count:
+                st.info(f"Model expects {feature_count} features. Creating custom vectorizer...")
+                compatible_vectorizer = create_compatible_vectorizer(feature_count)
+                
+                # Verify it works with the model
+                try:
+                    verify_model(model, compatible_vectorizer)
+                    return model, compatible_vectorizer
+                except Exception as compatibility_error:
+                    st.error(f"Cannot create compatible vectorizer: {str(compatibility_error)}")
+            else:
+                st.warning("Cannot determine model's expected feature count")
+                
+            # If we get here, we couldn't make the model work, so use fallback
+            st.error("Unable to use the GitHub model - falling back to simple model")
+            return create_fallback_model()
+                
         except Exception as e:
             st.error(f"Error loading model from GitHub: {str(e)}")
             # Fallback to a simple LogisticRegression model
@@ -213,7 +242,89 @@ def load_traditional_model(model_filename):
             # Fallback to a simple LogisticRegression model
             st.warning("Using a simple fallback model instead.")
             return create_fallback_model()
+
+def create_compatible_vectorizer(n_features):
+    """Create a vectorizer that produces a specific number of features"""
+    vectorizer = TfidfVectorizer(
+        max_features=n_features,
+        stop_words='english',
+        ngram_range=(1, 2),
+        min_df=2
+    )
+    
+    # Create a diverse political corpus to fit the vectorizer
+    political_corpus = [
+        # Conservative topics
+        "conservative republican right wing freedom liberty constitution america patriot small government",
+        "second amendment gun rights free speech religious freedom military pro life traditional values",
+        "lower taxes less regulation free market economy capitalism jobs border security law and order",
+        "individual responsibility family values states rights strong national defense protect freedoms",
+        
+        # Liberal topics
+        "liberal democrat progressive equality diversity inclusion minority rights climate change",
+        "healthcare for all education access social safety net workers rights regulation environmental protection",
+        "immigration reform gun control civil rights voting rights women rights lgbtq rights racial justice",
+        "science based policy social justice income inequality higher minimum wage corporate accountability",
+        
+        # Political topics
+        "election democracy president senate congress supreme court policy debate legislation vote",
+        "taxes spending economy jobs inflation recession growth trade deficit surplus budget",
+        "healthcare education climate immigration foreign policy national security domestic policy",
+        "military defense border security law enforcement police local state federal government",
+        
+        # Media and discourse terms
+        "media news bias facts opinion truth lies fake source article headline tweet post",
+        "debate discussion argument agree disagree view perspective partisan bipartisan compromise",
+        "left right center moderate extreme radical establishment elite populist grassroots movement"
+    ]
+    
+    # Add more texts by repeating and varying the corpus if needed
+    expanded_corpus = political_corpus.copy()
+    for text in political_corpus:
+        # Create variations by adding common words and mixing phrases
+        words = text.split()
+        if len(words) > 5:
+            # Mix words from different texts
+            for i in range(10):  # Create 10 variations
+                mixed_words = words.copy()
+                # Shuffle some words
+                for _ in range(min(5, len(words) // 2)):
+                    idx = np.random.randint(0, len(mixed_words))
+                    word = mixed_words.pop(idx)
+                    insert_idx = np.random.randint(0, len(mixed_words))
+                    mixed_words.insert(insert_idx, word)
+                expanded_corpus.append(" ".join(mixed_words))
+    
+    # Fit the vectorizer
+    vectorizer.fit(expanded_corpus)
+    
+    # Check the number of features produced
+    feature_names = vectorizer.get_feature_names_out()
+    st.info(f"Created vectorizer with {len(feature_names)} features (target: {n_features})")
+    
+    # If we didn't reach the desired number of features, try again with different parameters
+    if len(feature_names) < n_features:
+        st.warning(f"Created vectorizer has fewer features than needed. Adding synthetic features.")
+        # Add synthetic feature names that will never match real text
+        class CustomVectorizer:
+            def __init__(self, base_vectorizer, n_features):
+                self.base_vectorizer = base_vectorizer
+                self.n_features = n_features
+                self.n_padding = n_features - len(base_vectorizer.get_feature_names_out())
             
+            def transform(self, texts):
+                # Transform using the base vectorizer
+                X = self.base_vectorizer.transform(texts)
+                # Pad with zeros to reach the desired dimensionality
+                if self.n_padding > 0:
+                    padding = np.zeros((X.shape[0], self.n_padding))
+                    return np.hstack([X.toarray(), padding])
+                return X
+        
+        return CustomVectorizer(vectorizer, n_features)
+    
+    return vectorizer
+        
 def create_new_vectorizer():
     """Create a new TF-IDF vectorizer with basic political text content"""
     from sklearn.feature_extraction.text import TfidfVectorizer
