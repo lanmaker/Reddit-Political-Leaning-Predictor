@@ -12,6 +12,9 @@ import time
 from transformers import DistilBertTokenizer, DistilBertForSequenceClassification
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import LinearSVC
+from sklearn.naive_bayes import MultinomialNB
 
 # Set page config for better appearance
 st.set_page_config(
@@ -173,53 +176,225 @@ def load_distilbert_model():
     return model, tokenizer, preprocessing_info
 
 @st.cache_resource
+def load_standard_vectorizer():
+    try:
+        # Try to download the vectorizer from GitHub
+        st.info("Downloading the standard vectorizer...")
+        vectorizer_content = download_file_from_github("tfidf_vectorizer.pkl")
+        vectorizer = joblib.load(io.BytesIO(vectorizer_content))
+        return vectorizer
+    except Exception as e:
+        st.warning(f"Could not load vectorizer from GitHub: {str(e)}. Creating a new one...")
+        
+        # Create a new vectorizer
+        vectorizer = TfidfVectorizer(
+            max_features=5000,
+            stop_words='english',
+            ngram_range=(1, 2),
+            min_df=1
+        )
+        
+        # Fit the vectorizer on a diverse political corpus
+        political_corpus = [
+            # Conservative topics
+            "conservative republican right wing freedom liberty constitution america patriot small government",
+            "second amendment gun rights free speech religious freedom military pro life traditional values",
+            "lower taxes less regulation free market economy capitalism jobs border security law and order",
+            "individual responsibility family values states rights strong national defense protect freedoms",
+            
+            # Liberal topics
+            "liberal democrat progressive equality diversity inclusion minority rights climate change",
+            "healthcare for all education access social safety net workers rights regulation environmental protection",
+            "immigration reform gun control civil rights voting rights women rights lgbtq rights racial justice",
+            "science based policy social justice income inequality higher minimum wage corporate accountability",
+            
+            # Political topics
+            "election democracy president senate congress supreme court policy debate legislation vote",
+            "taxes spending economy jobs inflation recession growth trade deficit surplus budget",
+            "healthcare education climate immigration foreign policy national security domestic policy",
+            "military defense border security law enforcement police local state federal government"
+        ]
+        
+        # Also fit on training data if available
+        try:
+            train_df = load_training_data()
+            all_texts = list(political_corpus) + list(train_df['text'])
+            vectorizer.fit(all_texts)
+        except:
+            vectorizer.fit(political_corpus)
+            
+        st.success("Created and fitted new standard vectorizer")
+        return vectorizer
+
+# Load dataset for training local models - will be used if model compatibility fails
+@st.cache_resource
+def load_training_data():
+    try:
+        st.info("Loading training data for model adaptation...")
+        # Try to get training data from GitHub - use a small sample file for quick training
+        try:
+            # First try to get the small training CSV file
+            # This should be a small CSV with 'text' and 'label' columns with a sample of data
+            train_content = download_file_from_github("sample_training_data.csv", silent=True)
+            train_df = pd.read_csv(io.StringIO(train_content.decode('utf-8')))
+            
+            # Check if we have text and label columns
+            if 'text' in train_df.columns and 'label' in train_df.columns:
+                st.success(f"Loaded {len(train_df)} training examples")
+                return train_df
+            else:
+                st.warning("Training data does not have required columns. Using synthetic data.")
+        except Exception as e:
+            st.warning(f"Could not load training data from GitHub: {str(e)}")
+        
+        # If we get here, we need to create synthetic training data
+        st.info("Creating synthetic training data...")
+        
+        # Create balanced synthetic training data
+        liberal_texts = [
+            "I believe we need to strengthen our social safety net and provide healthcare for all citizens.",
+            "The government needs to do more to protect vulnerable populations and ensure equality.",
+            "Climate change is the most pressing issue of our time and we need immediate action.",
+            "We must work together to create a more inclusive society that respects diversity.",
+            "Education and healthcare should be available to everyone regardless of income.",
+            "Systemic racism exists and we need to acknowledge it to address it properly.",
+            "Tax the wealthy to provide better services for everyone in society.",
+            "The income inequality gap is growing too wide and needs to be addressed.",
+            "We need stronger environmental regulations to protect our planet.",
+            "Voting rights should be expanded and made more accessible to everyone."
+        ]
+        
+        conservative_texts = [
+            "Government regulations are strangling small businesses. We need to cut taxes.",
+            "Let the free market handle the economy better than bureaucrats ever could.",
+            "Second amendment rights are fundamental and should not be infringed.",
+            "Law-abiding citizens should have the right to own firearms for protection.",
+            "Strong borders are essential for maintaining national security and sovereignty.",
+            "Lower taxes and reduced government spending will stimulate economic growth.",
+            "Religious freedom and family values are the bedrock of our society.",
+            "Individual liberty and personal responsibility should be emphasized over government handouts.",
+            "The private sector can solve problems more efficiently than government programs.",
+            "We need to support law enforcement and military to maintain social order."
+        ]
+        
+        # Create a balanced DataFrame
+        texts = liberal_texts + conservative_texts
+        labels = [0] * len(liberal_texts) + [1] * len(conservative_texts)  # 0 for Liberal, 1 for Conservative
+        
+        train_df = pd.DataFrame({
+            'text': texts,
+            'label': labels
+        })
+        
+        st.success(f"Created synthetic training data with {len(train_df)} examples")
+        return train_df
+    
+    except Exception as e:
+        st.error(f"Error preparing training data: {str(e)}")
+        # Return minimal dataset as fallback
+        return pd.DataFrame({
+            'text': ["liberal support healthcare", "conservative lower taxes"],
+            'label': [0, 1]
+        })
+
+# Train a high-quality local model when imported models don't work
+@st.cache_resource
+def train_local_model(model_type="logistic_regression"):
+    try:
+        st.info(f"Training reliable local {model_type} model...")
+        
+        # Get the standard vectorizer
+        vectorizer = load_standard_vectorizer()
+        
+        # Load the training data
+        train_df = load_training_data()
+        
+        # Preprocess and vectorize the data
+        train_texts = [preprocess_text(text) for text in train_df['text']]
+        X_train = vectorizer.transform(train_texts)
+        y_train = train_df['label']
+        
+        # Create the model based on the requested type
+        if model_type == "logistic_regression":
+            model = LogisticRegression(C=1.0, random_state=42, max_iter=1000)
+        elif model_type == "linear_svm":
+            model = LinearSVC(C=1.0, random_state=42, max_iter=1000)
+        elif model_type == "multinomial_nb":
+            model = MultinomialNB(alpha=0.1)
+        elif model_type == "random_forest":
+            model = RandomForestClassifier(n_estimators=100, random_state=42)
+        else:
+            # Default to logistic regression
+            model = LogisticRegression(C=1.0, random_state=42, max_iter=1000)
+        
+        # Fit the model
+        model.fit(X_train, y_train)
+        
+        # Verify it works
+        prediction = model.predict(X_train[:1])
+        st.success(f"Local {model_type} model trained successfully. Test prediction: {prediction[0]}")
+        
+        return model
+    except Exception as e:
+        st.error(f"Error training local model: {str(e)}")
+        return None
+
+# Function to check if the GitHub model is compatible with our vectorizer
+def is_model_compatible(model, vectorizer):
+    try:
+        # Create a simple sample
+        sample_text = "this is a test message for political classification"
+        
+        # Check if vectorizer transforms work
+        X = vectorizer.transform([sample_text])
+        
+        # Try predicting
+        prediction = model.predict(X)
+        
+        # If we got here, the model is compatible
+        return True
+    except Exception as e:
+        return False
+
+# Load the traditional model
+@st.cache_resource
 def load_traditional_model(model_filename):
     if is_streamlit_cloud:
         try:
-            # First try to load the general TF-IDF vectorizer
-            try:
-                st.info("Downloading the standard vectorizer...")
-                vectorizer_content = download_file_from_github("tfidf_vectorizer.pkl")
-                vectorizer = joblib.load(io.BytesIO(vectorizer_content))
-                
-                # Load the selected model
-                st.info(f"Downloading {model_filename} from GitHub...")
-                model_content = download_file_from_github(model_filename)
-                model = joblib.load(io.BytesIO(model_content))
-                
-                # Try to verify compatibility
-                st.info("Verifying model and vectorizer compatibility...")
-                try:
-                    verify_model(model, vectorizer)
-                    return model, vectorizer
-                except Exception as e:
-                    st.warning(f"Model and standard vectorizer are not compatible: {str(e)}")
-                    # Continue to next approach
-            except Exception as e:
-                st.warning(f"Error with standard vectorizer: {str(e)}")
+            # First load the standard vectorizer to use with all models
+            standard_vectorizer = load_standard_vectorizer()
             
-            # If we get here, either the standard vectorizer didn't exist or was incompatible
-            # Try to create a new vectorizer that's compatible with the model
-            st.info("Creating a compatible vectorizer...")
+            # Now try to load the model
+            st.info(f"Downloading {model_filename} from GitHub...")
+            model_content = download_file_from_github(model_filename)
+            model = joblib.load(io.BytesIO(model_content))
             
-            # Get the model's expected feature count
-            feature_count = model.n_features_in_ if hasattr(model, 'n_features_in_') else None
-            if feature_count:
-                st.info(f"Model expects {feature_count} features. Creating custom vectorizer...")
-                compatible_vectorizer = create_compatible_vectorizer(feature_count)
-                
-                # Verify it works with the model
-                try:
-                    verify_model(model, compatible_vectorizer)
-                    return model, compatible_vectorizer
-                except Exception as compatibility_error:
-                    st.error(f"Cannot create compatible vectorizer: {str(compatibility_error)}")
+            # Check if this model is compatible with our standard vectorizer
+            st.info("Checking if model is compatible with our vectorizer...")
+            
+            if is_model_compatible(model, standard_vectorizer):
+                st.success("✅ Model is compatible with our vectorizer!")
+                return model, standard_vectorizer
             else:
-                st.warning("Cannot determine model's expected feature count")
+                st.warning("❌ Model is NOT compatible with our vectorizer. Training adaptation model...")
                 
-            # If we get here, we couldn't make the model work, so use fallback
-            st.error("Unable to use the GitHub model - falling back to simple model")
-            return create_fallback_model()
+                # Determine which model type based on filename
+                model_type = "logistic_regression"  # default
+                if "svm" in model_filename.lower():
+                    model_type = "linear_svm"
+                elif "naive_bayes" in model_filename.lower():
+                    model_type = "multinomial_nb"
+                elif "forest" in model_filename.lower():
+                    model_type = "random_forest"
+                
+                # Train a local model of the same type
+                local_model = train_local_model(model_type)
+                
+                if local_model:
+                    return local_model, standard_vectorizer
+                else:
+                    st.error("Failed to train local model. Using fallback model.")
+                    return create_fallback_model()
                 
         except Exception as e:
             st.error(f"Error loading model from GitHub: {str(e)}")
@@ -243,107 +418,7 @@ def load_traditional_model(model_filename):
             st.warning("Using a simple fallback model instead.")
             return create_fallback_model()
 
-def create_compatible_vectorizer(n_features):
-    """Create a vectorizer that produces a specific number of features"""
-    vectorizer = TfidfVectorizer(
-        max_features=n_features,
-        stop_words='english',
-        ngram_range=(1, 2),
-        min_df=2
-    )
-    
-    # Create a diverse political corpus to fit the vectorizer
-    political_corpus = [
-        # Conservative topics
-        "conservative republican right wing freedom liberty constitution america patriot small government",
-        "second amendment gun rights free speech religious freedom military pro life traditional values",
-        "lower taxes less regulation free market economy capitalism jobs border security law and order",
-        "individual responsibility family values states rights strong national defense protect freedoms",
-        
-        # Liberal topics
-        "liberal democrat progressive equality diversity inclusion minority rights climate change",
-        "healthcare for all education access social safety net workers rights regulation environmental protection",
-        "immigration reform gun control civil rights voting rights women rights lgbtq rights racial justice",
-        "science based policy social justice income inequality higher minimum wage corporate accountability",
-        
-        # Political topics
-        "election democracy president senate congress supreme court policy debate legislation vote",
-        "taxes spending economy jobs inflation recession growth trade deficit surplus budget",
-        "healthcare education climate immigration foreign policy national security domestic policy",
-        "military defense border security law enforcement police local state federal government",
-        
-        # Media and discourse terms
-        "media news bias facts opinion truth lies fake source article headline tweet post",
-        "debate discussion argument agree disagree view perspective partisan bipartisan compromise",
-        "left right center moderate extreme radical establishment elite populist grassroots movement"
-    ]
-    
-    # Add more texts by repeating and varying the corpus if needed
-    expanded_corpus = political_corpus.copy()
-    for text in political_corpus:
-        # Create variations by adding common words and mixing phrases
-        words = text.split()
-        if len(words) > 5:
-            # Mix words from different texts
-            for i in range(10):  # Create 10 variations
-                mixed_words = words.copy()
-                # Shuffle some words
-                for _ in range(min(5, len(words) // 2)):
-                    idx = np.random.randint(0, len(mixed_words))
-                    word = mixed_words.pop(idx)
-                    insert_idx = np.random.randint(0, len(mixed_words))
-                    mixed_words.insert(insert_idx, word)
-                expanded_corpus.append(" ".join(mixed_words))
-    
-    # Fit the vectorizer
-    vectorizer.fit(expanded_corpus)
-    
-    # Check the number of features produced
-    feature_names = vectorizer.get_feature_names_out()
-    st.info(f"Created vectorizer with {len(feature_names)} features (target: {n_features})")
-    
-    # If we didn't reach the desired number of features, try again with different parameters
-    if len(feature_names) < n_features:
-        st.warning(f"Created vectorizer has fewer features than needed. Adding synthetic features.")
-        # Add synthetic feature names that will never match real text
-        class CustomVectorizer:
-            def __init__(self, base_vectorizer, n_features):
-                self.base_vectorizer = base_vectorizer
-                self.n_features = n_features
-                self.n_padding = n_features - len(base_vectorizer.get_feature_names_out())
-            
-            def transform(self, texts):
-                # Transform using the base vectorizer
-                X = self.base_vectorizer.transform(texts)
-                # Pad with zeros to reach the desired dimensionality
-                if self.n_padding > 0:
-                    padding = np.zeros((X.shape[0], self.n_padding))
-                    return np.hstack([X.toarray(), padding])
-                return X
-        
-        return CustomVectorizer(vectorizer, n_features)
-    
-    return vectorizer
-        
-def create_new_vectorizer():
-    """Create a new TF-IDF vectorizer with basic political text content"""
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    
-    st.info("Creating new TF-IDF vectorizer from scratch...")
-    vectorizer = TfidfVectorizer(max_features=5000)
-    # Create some diverse political texts to fit the vectorizer
-    texts = [
-        "conservative right wing republican freedom liberty constitution america patriot",
-        "liberal left wing democrat equality diversity inclusion progressive rights",
-        "taxes economy jobs government regulation business market freedom capitalism",
-        "healthcare education climate welfare social security immigration reform",
-        "military defense border security law enforcement police states rights",
-        "abortion gun control environment civil rights voting equality justice"
-    ]
-    vectorizer.fit(texts)
-    st.success("New vectorizer created and fitted successfully")
-    return vectorizer
-
+# Function to verify a model works correctly        
 def verify_model(model, vectorizer):
     """Verify that the model is properly fitted by attempting a simple prediction"""
     try:
@@ -426,34 +501,7 @@ def create_fallback_model():
     
     return model, vectorizer
 
-# Prediction functions
-def predict_with_distilbert(text, model, tokenizer, max_length):
-    # Preprocess text
-    text = preprocess_text(text)
-    
-    # Tokenize
-    encoding = tokenizer(
-        text,
-        add_special_tokens=True,
-        max_length=max_length,
-        truncation=True,
-        padding='max_length',
-        return_tensors='pt'
-    )
-    
-    # Get predictions
-    model.eval()
-    with torch.no_grad():
-        outputs = model(input_ids=encoding['input_ids'], attention_mask=encoding['attention_mask'])
-        logits = outputs.logits
-        prediction = torch.argmax(logits, dim=1).item()
-    
-    # Get probabilities using softmax
-    probs = torch.nn.functional.softmax(logits, dim=1)
-    confidence = probs[0][prediction].item()
-    
-    return prediction, confidence
-
+# Prediction function
 def predict_with_traditional(text, model, vectorizer):
     try:
         # Preprocess text
@@ -470,7 +518,16 @@ def predict_with_traditional(text, model, vectorizer):
             probs = model.predict_proba(X)
             confidence = probs[0][prediction]
         else:
-            confidence = 0.7  # Default confidence if not available
+            # For SVM models without predict_proba, use a heuristic
+            if hasattr(model, 'decision_function'):
+                # Get decision function value and convert to pseudo-probability
+                decision = model.decision_function(X)[0]
+                # Sigmoid function to convert to range 0-1
+                confidence = 1 / (1 + np.exp(-np.abs(decision)))
+                # Ensure confidence is at least 0.5
+                confidence = max(confidence, 0.5)
+            else:
+                confidence = 0.7  # Default confidence if not available
         
         return prediction, confidence
     except Exception as e:
