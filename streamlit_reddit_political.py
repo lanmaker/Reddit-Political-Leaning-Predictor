@@ -10,6 +10,8 @@ import io
 import tempfile
 import time
 from transformers import DistilBertTokenizer, DistilBertForSequenceClassification
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
 
 # Set page config for better appearance
 st.set_page_config(
@@ -41,9 +43,18 @@ else:
     vectorizer_path = None
 
 # GitHub repo details
-GITHUB_USERNAME = "lanmaker"  
-GITHUB_REPO = "Reddit-Political-Leaning-Predictor"  
+GITHUB_USERNAME = "your-github-username"  
+GITHUB_REPO = "your-repo-name"  
 GITHUB_BRANCH = "main"  
+
+# Define which models are small enough for GitHub (<25MB)
+GITHUB_COMPATIBLE_MODELS = [
+    "linear_svm.pkl",           # 105 KB
+    "logistic_regression.pkl",  # 105 KB
+    "multinomial_naive_bayes.pkl", # 417 KB
+    "smote_+_logistic_regression.pkl", # 1.5 MB
+    "tfidf_vectorizer.pkl"      # 515 KB
+]
 
 # Function to get file from GitHub
 def download_file_from_github(filename):
@@ -383,69 +394,51 @@ This app predicts whether a Reddit post is more likely to be from a Liberal or C
 Enter your text below and select a model to make a prediction!
 """)
 
-# Model selection
-model_type = st.sidebar.radio(
-    "Select Model Type:",
-    ["DistilBERT (Transformer)", "Traditional ML (Faster)"]
+# Add information about the GitHub deployment
+if is_streamlit_cloud:
+    st.sidebar.markdown("### GitHub Deployment")
+    st.sidebar.info(
+        "This app is running from GitHub with models under 25MB. "
+        "For optimal performance, use the Logistic Regression or Linear SVM models."
+    )
+
+# Filter available models based on whether we're in cloud environment
+if is_streamlit_cloud:
+    # On cloud - only use GitHub-compatible models
+    traditional_model_files = GITHUB_COMPATIBLE_MODELS
+    # Remove vectorizer from the list as it's not a prediction model
+    if "tfidf_vectorizer.pkl" in traditional_model_files:
+        traditional_model_files.remove("tfidf_vectorizer.pkl")
+else:
+    # Only try to access local directory when not in cloud
+    try:
+        traditional_model_files = [f for f in os.listdir(model_dir) if f.endswith('.pkl') and not f.startswith('tfidf')]
+        if not traditional_model_files:  # If directory exists but empty
+            st.warning("No model files found in local directory. Using default model list.")
+            traditional_model_files = GITHUB_COMPATIBLE_MODELS
+    except (FileNotFoundError, TypeError):
+        st.warning("Could not access local model directory. Using default model list.")
+        traditional_model_files = GITHUB_COMPATIBLE_MODELS
+
+# Add model information in the sidebar
+st.sidebar.markdown("### Model Information")
+st.sidebar.markdown("""
+**Traditional ML** models are effective for text classification:
+
+- Fast prediction time
+- Good accuracy
+- Small model size for cloud deployment
+""")
+
+# Model selection in sidebar
+selected_model = st.sidebar.selectbox(
+    "Select Model:",
+    traditional_model_files,
+    format_func=lambda x: x.replace('_', ' ').replace('.pkl', '').title()
 )
 
-# Add some model information in the sidebar
-st.sidebar.markdown("### Model Information")
-if model_type == "DistilBERT (Transformer)":
-    st.sidebar.markdown("""
-    **DistilBERT** is a smaller, faster transformer model that retains 97% of BERT's performance.
-    
-    - Higher accuracy
-    - Better understanding of context
-    - Slower prediction time
-    """)
-else:
-    st.sidebar.markdown("""
-    **Traditional ML** models are simpler but very effective for text classification.
-    
-    - Faster prediction time
-    - Good accuracy
-    - Less memory usage
-    """)
-
-# Load appropriate model
-if model_type == "DistilBERT (Transformer)":
-    model, tokenizer, preprocessing_info = load_distilbert_model()
-    max_length = preprocessing_info.get('max_length', 128)
-else:
-    # For Traditional ML, let user select which model to use
-    # Always define default models list as fallback
-    default_model_files = [
-        "logistic_regression.pkl",
-        "linear_svm.pkl",
-        "multinomial_naive_bayes.pkl",
-        "random_forest.pkl",
-        "ensemble.pkl",
-        "smote_+_logistic_regression.pkl",
-        "smote_+_random_forest.pkl"
-    ]
-    
-    if is_streamlit_cloud:
-        # When in cloud, use the predefined list
-        traditional_model_files = default_model_files
-    else:
-        # Only try to access local directory when not in cloud
-        try:
-            traditional_model_files = [f for f in os.listdir(model_dir) if f.endswith('.pkl') and not f.startswith('tfidf')]
-            if not traditional_model_files:  # If directory exists but empty
-                st.warning("No model files found in local directory. Using default model list.")
-                traditional_model_files = default_model_files
-        except (FileNotFoundError, TypeError):
-            st.warning("Could not access local model directory. Using default model list.")
-            traditional_model_files = default_model_files
-    
-    selected_model = st.sidebar.selectbox(
-        "Select Traditional Model:",
-        traditional_model_files,
-        format_func=lambda x: x.replace('_', ' ').replace('.pkl', '').title()
-    )
-    
-    model, vectorizer = load_traditional_model(selected_model)
+# Load the selected model
+model, vectorizer = load_traditional_model(selected_model)
 
 # Initialize session state for text input
 if 'text_input' not in st.session_state:
@@ -478,10 +471,7 @@ if st.button("Predict Political Leaning", type="primary"):
     else:
         # Display spinner while processing
         with st.spinner("Analyzing text..."):
-            if model_type == "DistilBERT (Transformer)":
-                prediction, confidence = predict_with_distilbert(text_input, model, tokenizer, max_length)
-            else:
-                prediction, confidence = predict_with_traditional(text_input, model, vectorizer)
+            prediction, confidence = predict_with_traditional(text_input, model, vectorizer)
             
             # Display results with improved visualization
             st.markdown("### Prediction Results")
@@ -506,11 +496,7 @@ if st.button("Predict Political Leaning", type="primary"):
             # Add explanation of results
             st.markdown("### Analysis")
             st.write(f"The model has classified this text as {label} with {confidence*100:.1f}% confidence.")
-            
-            if model_type == "DistilBERT (Transformer)":
-                st.write("DistilBERT analyzes the context and semantic meaning of your text to identify political leanings based on language patterns it learned during training.")
-            else:
-                st.write("The traditional model identifies important words and phrases that are statistically associated with political leanings based on historical data.")
+            st.write("The model identifies important words and phrases that are statistically associated with political leanings based on historical data from Reddit.")
 
 # Add footer with additional information
 st.markdown("---")
@@ -519,3 +505,4 @@ st.markdown("""
 <small>This model was trained on Reddit posts from political subreddits. It may not be accurate for all political content.</small>
 </div>
 """, unsafe_allow_html=True) 
+
