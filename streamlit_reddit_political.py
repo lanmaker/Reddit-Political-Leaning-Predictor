@@ -42,9 +42,9 @@ else:
     distilbert_dir = None
     vectorizer_path = None
 
-# GitHub repo details
-GITHUB_USERNAME = "your-github-username"  
-GITHUB_REPO = "your-repo-name"  
+# GitHub repo details - UPDATE THESE WITH YOUR ACTUAL GITHUB INFORMATION
+GITHUB_USERNAME = "lanmaker"  
+GITHUB_REPO = "Reddit-Political-Leaning-Predictor"  
 GITHUB_BRANCH = "main"  
 
 # Define which models are small enough for GitHub (<25MB)
@@ -53,8 +53,15 @@ GITHUB_COMPATIBLE_MODELS = [
     "logistic_regression.pkl",  # 105 KB
     "multinomial_naive_bayes.pkl", # 417 KB
     "smote_+_logistic_regression.pkl", # 1.5 MB
-    "tfidf_vectorizer.pkl"      # 515 KB
 ]
+
+# Define model-vectorizer pairs to ensure compatibility
+MODEL_VECTORIZER_PAIRS = {
+    "linear_svm.pkl": "tfidf_vectorizer_linear_svm.pkl",
+    "logistic_regression.pkl": "tfidf_vectorizer_logistic_regression.pkl",
+    "multinomial_naive_bayes.pkl": "tfidf_vectorizer_multinomial_nb.pkl",
+    "smote_+_logistic_regression.pkl": "tfidf_vectorizer_smote_lr.pkl"
+}
 
 # Function to get file from GitHub
 def download_file_from_github(filename):
@@ -162,26 +169,17 @@ def load_distilbert_model():
 def load_traditional_model(model_filename):
     if is_streamlit_cloud:
         try:
-            # First, ensure we have a working vectorizer before loading any models
-            if not hasattr(load_traditional_model, 'vectorizer'):
-                st.info("Downloading vectorizer from GitHub first...")
-                try:
-                    vectorizer_content = download_file_from_github("tfidf_vectorizer.pkl")
-                    vectorizer = joblib.load(io.BytesIO(vectorizer_content))
-                    
-                    # Validate vectorizer works by trying a simple transform
-                    _ = vectorizer.transform(["test vectorizer"])
-                    st.success("Vectorizer validated successfully!")
-                    
-                    # Cache the vectorizer for future use
-                    load_traditional_model.vectorizer = vectorizer
-                except Exception as e:
-                    st.error(f"Vectorizer validation failed: {str(e)}")
-                    st.warning("Creating a new vectorizer instead...")
-                    vectorizer = create_new_vectorizer()
-                    load_traditional_model.vectorizer = vectorizer
-            else:
-                vectorizer = load_traditional_model.vectorizer
+            # Get the paired vectorizer filename for this model
+            vectorizer_filename = MODEL_VECTORIZER_PAIRS.get(model_filename, "tfidf_vectorizer.pkl")
+            
+            # Download and load the paired vectorizer
+            st.info(f"Downloading vectorizer {vectorizer_filename} matched to {model_filename}...")
+            vectorizer_content = download_file_from_github(vectorizer_filename)
+            vectorizer = joblib.load(io.BytesIO(vectorizer_content))
+            
+            # Validate vectorizer works by trying a simple transform
+            _ = vectorizer.transform(["test vectorizer"])
+            st.success(f"Vectorizer {vectorizer_filename} validated successfully!")
                 
             # Now download and load the model
             st.info(f"Downloading {model_filename} from GitHub...")
@@ -198,7 +196,7 @@ def load_traditional_model(model_filename):
             st.error(f"Error loading model from GitHub: {str(e)}")
             # Fallback to a simple LogisticRegression model
             st.warning("Using a simple fallback model instead.")
-            return create_fallback_model(vectorizer=load_traditional_model.vectorizer if hasattr(load_traditional_model, 'vectorizer') else None)
+            return create_fallback_model()
     else:
         # Local environment
         try:
@@ -214,7 +212,7 @@ def load_traditional_model(model_filename):
             st.error(f"Error loading local model: {str(e)}")
             # Fallback to a simple LogisticRegression model
             st.warning("Using a simple fallback model instead.")
-            return create_fallback_model(vectorizer)
+            return create_fallback_model()
             
 def create_new_vectorizer():
     """Create a new TF-IDF vectorizer with basic political text content"""
@@ -281,37 +279,24 @@ def verify_model(model, vectorizer):
                 st.warning(f"- Missing '{attr}' attribute/method")
         raise e
 
-def create_fallback_model(vectorizer=None):
+def create_fallback_model():
     """Create a simple fallback model for when the main model fails to load"""
     from sklearn.linear_model import LogisticRegression
     from sklearn.feature_extraction.text import TfidfVectorizer
     
-    # Create a new vectorizer if none provided or if the provided one fails
-    try:
-        if vectorizer is None or not hasattr(vectorizer, 'transform'):
-            st.info("Creating new TF-IDF vectorizer for fallback model...")
-            vectorizer = TfidfVectorizer(max_features=5000)
-            # Fit with some sample data
-            sample_texts = [
-                "conservative republican right wing freedom",
-                "liberal democrat left wing equality",
-                "government taxes spending economy jobs",
-                "healthcare education climate immigration",
-                "sample text for testing the fallback model"
-            ]
-            vectorizer.fit(sample_texts)
-        else:
-            # Test the provided vectorizer
-            _ = vectorizer.transform(["test"])
-    except Exception as e:
-        st.warning(f"Vectorizer issue: {str(e)}. Creating new vectorizer.")
-        vectorizer = TfidfVectorizer(max_features=5000)
-        sample_texts = [
-            "conservative republican right wing freedom",
-            "liberal democrat left wing equality", 
-            "test"
-        ]
-        vectorizer.fit(sample_texts)
+    # Create a simple vectorizer
+    st.info("Creating fallback TF-IDF vectorizer...")
+    vectorizer = TfidfVectorizer(max_features=1000)
+    
+    # Fit with some sample data
+    sample_texts = [
+        "conservative republican right wing freedom",
+        "liberal democrat left wing equality",
+        "government taxes spending economy jobs",
+        "healthcare education climate immigration",
+        "sample text for testing the fallback model"
+    ]
+    vectorizer.fit(sample_texts)
     
     # Create a simple model with minimal weights
     model = LogisticRegression(random_state=42)
@@ -326,6 +311,7 @@ def create_fallback_model(vectorizer=None):
     
     # Fit the model
     model.fit(X_train, y_train)
+    st.success("Fallback model created and fitted successfully")
     
     return model, vectorizer
 
@@ -406,9 +392,6 @@ if is_streamlit_cloud:
 if is_streamlit_cloud:
     # On cloud - only use GitHub-compatible models
     traditional_model_files = GITHUB_COMPATIBLE_MODELS
-    # Remove vectorizer from the list as it's not a prediction model
-    if "tfidf_vectorizer.pkl" in traditional_model_files:
-        traditional_model_files.remove("tfidf_vectorizer.pkl")
 else:
     # Only try to access local directory when not in cloud
     try:
@@ -505,4 +488,5 @@ st.markdown("""
 <small>This model was trained on Reddit posts from political subreddits. It may not be accurate for all political content.</small>
 </div>
 """, unsafe_allow_html=True) 
+
 
