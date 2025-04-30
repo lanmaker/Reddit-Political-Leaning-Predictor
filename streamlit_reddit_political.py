@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import torch
 import joblib
 import os
 import re
@@ -9,7 +8,6 @@ import requests
 import io
 import tempfile
 import time
-from transformers import DistilBertTokenizer, DistilBertForSequenceClassification
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
@@ -167,15 +165,13 @@ if not is_streamlit_cloud and os.path.exists("/mount/src"):
 if not is_streamlit_cloud:
     # Only use local directories when not in cloud
     model_dir = os.path.join(script_dir, "models")
-    distilbert_dir = os.path.join(model_dir, "distilbert_model")
     vectorizer_path = os.path.join(model_dir, "tfidf_vectorizer.pkl")
 else:
     # Placeholder paths for cloud deployment (won't be directly accessed)
     model_dir = None
-    distilbert_dir = None
     vectorizer_path = None
 
-# GitHub repo details - UPDATE THESE WITH YOUR ACTUAL GITHUB INFORMATION
+# GitHub repo details
 GITHUB_USERNAME = "lanmaker"  
 GITHUB_REPO = "Reddit-Political-Leaning-Predictor"  
 GITHUB_BRANCH = "main"  
@@ -188,25 +184,12 @@ GITHUB_COMPATIBLE_MODELS = [
     "smote_+_logistic_regression.pkl", # 1.5 MB
 ]
 
-# Define model-vectorizer pairs to ensure compatibility
-MODEL_VECTORIZER_PAIRS = {
-    "linear_svm.pkl": "tfidf_vectorizer_linear_svm.pkl",
-    "logistic_regression.pkl": "tfidf_vectorizer_logistic_regression.pkl",
-    "multinomial_naive_bayes.pkl": "tfidf_vectorizer_multinomial_nb.pkl",
-    "smote_+_logistic_regression.pkl": "tfidf_vectorizer_smote_lr.pkl"
-}
-
 # Create a spinner container for background operations
-spinner_container = st.empty()
+operation_status = st.empty()
 
 # Function to get file from GitHub - with silent option
-def download_file_from_github(filename, silent=False):
+def download_file_from_github(filename):
     github_url = f"https://raw.githubusercontent.com/{GITHUB_USERNAME}/{GITHUB_REPO}/{GITHUB_BRANCH}/{filename}"
-    
-    # Only show download messages if not silent
-    if not silent:
-        with spinner_container.container():
-            st.write(f"Loading {filename.split('/')[-1]}...")
     
     # Add a retry mechanism
     max_retries = 3
@@ -214,16 +197,6 @@ def download_file_from_github(filename, silent=False):
         try:
             response = requests.get(github_url)
             if response.status_code == 200:
-                content_size = len(response.content)
-                
-                # Basic validation for pkl files - silently
-                if filename.endswith('.pkl'):
-                    try:
-                        # Try to load the model to verify it's valid
-                        model_obj = joblib.load(io.BytesIO(response.content))
-                        return response.content
-                    except Exception as e:
-                        raise Exception(f"Invalid model file: {str(e)}")
                 return response.content
             else:
                 if attempt < max_retries - 1:
@@ -252,62 +225,29 @@ def preprocess_text(text):
     
     return text
 
-# Load the model based on user selection
-@st.cache_resource
-def load_distilbert_model():
-    # Default model
-    model_name = "distilbert-base-uncased"
-    
-    if is_streamlit_cloud:
-        # When in Streamlit Cloud, download from Hugging Face
-        try:
-            st.info("Loading DistilBERT model from Hugging Face Hub (this may take a moment)...")
-            tokenizer = DistilBertTokenizer.from_pretrained(model_name)
-            model = DistilBertForSequenceClassification.from_pretrained(model_name, num_labels=2)
-            preprocessing_info = {'max_length': 128}
-            st.success(f"Successfully loaded DistilBERT model from Hugging Face Hub")
-            print(f"Using DistilBERT model: {model_name}")
-        except Exception as e:
-            st.error(f"Error loading model from Hugging Face: {str(e)}")
-            # Create a dummy model with random weights as fallback
-            tokenizer = DistilBertTokenizer.from_pretrained(model_name, cache_dir=tempfile.gettempdir())
-            model = DistilBertForSequenceClassification.from_pretrained(
-                model_name, 
-                num_labels=2,
-                cache_dir=tempfile.gettempdir()
-            )
-            preprocessing_info = {'max_length': 128}
-    else:
-        # Local environment - try to load from local directory first
-        try:
-            if os.path.exists(distilbert_dir):
-                tokenizer = DistilBertTokenizer.from_pretrained(distilbert_dir)
-                model = DistilBertForSequenceClassification.from_pretrained(distilbert_dir)
-                preprocessing_info = joblib.load(os.path.join(distilbert_dir, 'preprocessing_info.pkl'))
-                print("Loaded DistilBERT model from local directory")
-            else:
-                raise FileNotFoundError(f"Local model directory {distilbert_dir} not found")
-        except Exception as e:
-            # If local loading fails, download from Hugging Face Hub
-            st.warning(f"Failed to load local model: {str(e)}")
-            st.info("Loading DistilBERT model from Hugging Face Hub (this may take a moment)...")
-            tokenizer = DistilBertTokenizer.from_pretrained(model_name)
-            model = DistilBertForSequenceClassification.from_pretrained(model_name, num_labels=2)
-            preprocessing_info = {'max_length': 128}
-            print(f"Downloaded DistilBERT model from Hugging Face Hub: {model_name}")
-    
-    return model, tokenizer, preprocessing_info
-
-@st.cache_resource
+# Load the standard vectorizer
 def load_standard_vectorizer():
+    """Load vectorizer without caching"""
     try:
         # Try to download the vectorizer from GitHub
-        vectorizer_content = download_file_from_github("tfidf_vectorizer.pkl", silent=True)
-        vectorizer = joblib.load(io.BytesIO(vectorizer_content))
-        return vectorizer
-    except Exception as e:
-        st.warning(f"Could not load vectorizer from GitHub: {str(e)}. Creating a new one...")
+        vectorizer_content = download_file_from_github("tfidf_vectorizer.pkl")
         
+        # Create a temporary file to save the vectorizer
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            temp_file.write(vectorizer_content)
+            temp_path = temp_file.name
+        
+        # Load from the temp file
+        vectorizer = joblib.load(temp_path)
+        
+        # Clean up temp file
+        try:
+            os.unlink(temp_path)
+        except:
+            pass
+            
+        return vectorizer
+    except Exception:
         # Create a new vectorizer
         vectorizer = TfidfVectorizer(
             max_features=5000,
@@ -337,131 +277,91 @@ def load_standard_vectorizer():
             "military defense border security law enforcement police local state federal government"
         ]
         
-        # Also fit on training data if available
-        try:
-            train_df = load_training_data()
-            all_texts = list(political_corpus) + list(train_df['text'])
-            vectorizer.fit(all_texts)
-        except:
-            vectorizer.fit(political_corpus)
+        # Also fit on synthetic training data
+        texts = [
+            "liberal support healthcare", "conservative lower taxes",
+            "climate change environment", "second amendment rights",
+            "equality diversity inclusion", "freedom liberty constitution",
+            "government regulation", "free market economy",
+            "social programs welfare", "individual responsibility"
+        ]
+        
+        all_texts = list(political_corpus) + texts
+        vectorizer.fit(all_texts)
             
-        st.success("Created and fitted new standard vectorizer")
         return vectorizer
 
-# Load dataset for training local models - will be used if model compatibility fails
-@st.cache_resource
-def load_training_data():
-    try:
-        st.info("Loading training data for model adaptation...")
-        # Try to get training data from GitHub - use a small sample file for quick training
-        try:
-            # First try to get the small training CSV file
-            # This should be a small CSV with 'text' and 'label' columns with a sample of data
-            train_content = download_file_from_github("sample_training_data.csv", silent=True)
-            train_df = pd.read_csv(io.StringIO(train_content.decode('utf-8')))
-            
-            # Check if we have text and label columns
-            if 'text' in train_df.columns and 'label' in train_df.columns:
-                st.success(f"Loaded {len(train_df)} training examples")
-                return train_df
-            else:
-                st.warning("Training data does not have required columns. Using synthetic data.")
-        except Exception as e:
-            st.warning(f"Could not load training data from GitHub: {str(e)}")
-        
-        # If we get here, we need to create synthetic training data
-        st.info("Creating synthetic training data...")
-        
-        # Create balanced synthetic training data
-        liberal_texts = [
-            "I believe we need to strengthen our social safety net and provide healthcare for all citizens.",
-            "The government needs to do more to protect vulnerable populations and ensure equality.",
-            "Climate change is the most pressing issue of our time and we need immediate action.",
-            "We must work together to create a more inclusive society that respects diversity.",
-            "Education and healthcare should be available to everyone regardless of income.",
-            "Systemic racism exists and we need to acknowledge it to address it properly.",
-            "Tax the wealthy to provide better services for everyone in society.",
-            "The income inequality gap is growing too wide and needs to be addressed.",
-            "We need stronger environmental regulations to protect our planet.",
-            "Voting rights should be expanded and made more accessible to everyone."
-        ]
-        
-        conservative_texts = [
-            "Government regulations are strangling small businesses. We need to cut taxes.",
-            "Let the free market handle the economy better than bureaucrats ever could.",
-            "Second amendment rights are fundamental and should not be infringed.",
-            "Law-abiding citizens should have the right to own firearms for protection.",
-            "Strong borders are essential for maintaining national security and sovereignty.",
-            "Lower taxes and reduced government spending will stimulate economic growth.",
-            "Religious freedom and family values are the bedrock of our society.",
-            "Individual liberty and personal responsibility should be emphasized over government handouts.",
-            "The private sector can solve problems more efficiently than government programs.",
-            "We need to support law enforcement and military to maintain social order."
-        ]
-        
-        # Create a balanced DataFrame
-        texts = liberal_texts + conservative_texts
-        labels = [0] * len(liberal_texts) + [1] * len(conservative_texts)  # 0 for Liberal, 1 for Conservative
-        
-        train_df = pd.DataFrame({
-            'text': texts,
-            'label': labels
-        })
-        
-        st.success(f"Created synthetic training data with {len(train_df)} examples")
-        return train_df
+# Create synthetic training data for fallback models
+def create_synthetic_training_data():
+    """Create synthetic data for training models"""
+    # Create balanced synthetic training data
+    liberal_texts = [
+        "I believe we need to strengthen our social safety net and provide healthcare for all citizens.",
+        "The government needs to do more to protect vulnerable populations and ensure equality.",
+        "Climate change is the most pressing issue of our time and we need immediate action.",
+        "We must work together to create a more inclusive society that respects diversity.",
+        "Education and healthcare should be available to everyone regardless of income.",
+        "Systemic racism exists and we need to acknowledge it to address it properly.",
+        "Tax the wealthy to provide better services for everyone in society.",
+        "The income inequality gap is growing too wide and needs to be addressed.",
+        "We need stronger environmental regulations to protect our planet.",
+        "Voting rights should be expanded and made more accessible to everyone."
+    ]
     
-    except Exception as e:
-        st.error(f"Error preparing training data: {str(e)}")
-        # Return minimal dataset as fallback
-        return pd.DataFrame({
-            'text': ["liberal support healthcare", "conservative lower taxes"],
-            'label': [0, 1]
-        })
+    conservative_texts = [
+        "Government regulations are strangling small businesses. We need to cut taxes.",
+        "Let the free market handle the economy better than bureaucrats ever could.",
+        "Second amendment rights are fundamental and should not be infringed.",
+        "Law-abiding citizens should have the right to own firearms for protection.",
+        "Strong borders are essential for maintaining national security and sovereignty.",
+        "Lower taxes and reduced government spending will stimulate economic growth.",
+        "Religious freedom and family values are the bedrock of our society.",
+        "Individual liberty and personal responsibility should be emphasized over government handouts.",
+        "The private sector can solve problems more efficiently than government programs.",
+        "We need to support law enforcement and military to maintain social order."
+    ]
+    
+    # Create a balanced DataFrame
+    texts = liberal_texts + conservative_texts
+    labels = [0] * len(liberal_texts) + [1] * len(conservative_texts)  # 0 for Liberal, 1 for Conservative
+    
+    return pd.DataFrame({'text': texts, 'label': labels})
 
-# Train a high-quality local model when imported models don't work
-@st.cache_resource
+# Train a local model with synthetic data
 def train_local_model(model_type="logistic_regression"):
-    try:
-        with spinner_container.container():
-            st.markdown("⏳ Training a new model...")
-        
-        # Get the standard vectorizer
-        vectorizer = load_standard_vectorizer()
-        
-        # Load the training data
-        train_df = load_training_data()
-        
-        # Preprocess and vectorize the data
-        train_texts = [preprocess_text(text) for text in train_df['text']]
-        X_train = vectorizer.transform(train_texts)
-        y_train = train_df['label']
-        
-        # Create the model based on the requested type
-        if model_type == "logistic_regression":
-            model = LogisticRegression(C=1.0, random_state=42, max_iter=1000)
-        elif model_type == "linear_svm":
-            model = LinearSVC(C=1.0, random_state=42, max_iter=1000)
-        elif model_type == "multinomial_nb":
-            model = MultinomialNB(alpha=0.1)
-        elif model_type == "random_forest":
-            model = RandomForestClassifier(n_estimators=100, random_state=42)
-        else:
-            # Default to logistic regression
-            model = LogisticRegression(C=1.0, random_state=42, max_iter=1000)
-        
-        # Fit the model
-        model.fit(X_train, y_train)
-        
-        # Verify it works
-        prediction = model.predict(X_train[:1])
-        
-        return model
-    except Exception:
-        return None
+    """Train a local model with synthetic data"""
+    # Get the standard vectorizer
+    vectorizer = load_standard_vectorizer()
+    
+    # Create synthetic training data
+    train_df = create_synthetic_training_data()
+    
+    # Preprocess and vectorize the data
+    train_texts = [preprocess_text(text) for text in train_df['text']]
+    X_train = vectorizer.transform(train_texts)
+    y_train = train_df['label']
+    
+    # Create the model based on the requested type
+    if model_type == "logistic_regression":
+        model = LogisticRegression(C=1.0, random_state=42, max_iter=1000)
+    elif model_type == "linear_svm":
+        model = LinearSVC(C=1.0, random_state=42, max_iter=1000)
+    elif model_type == "multinomial_nb":
+        model = MultinomialNB(alpha=0.1)
+    elif model_type == "random_forest":
+        model = RandomForestClassifier(n_estimators=100, random_state=42)
+    else:
+        # Default to logistic regression
+        model = LogisticRegression(C=1.0, random_state=42, max_iter=1000)
+    
+    # Fit the model
+    model.fit(X_train, y_train)
+    
+    return model, vectorizer
 
 # Function to check if the GitHub model is compatible with our vectorizer
 def is_model_compatible(model, vectorizer):
+    """Check if model and vectorizer are compatible"""
     try:
         # Create a simple sample
         sample_text = "this is a test message for political classification"
@@ -477,25 +377,43 @@ def is_model_compatible(model, vectorizer):
     except Exception:
         return False
 
-# Load the traditional model
-@st.cache_resource
-def load_traditional_model(model_filename):
+# Load model based on selection
+def load_model_by_name(model_filename):
+    """Load a specific model by name"""
+    operation_status.info(f"Loading {model_filename.replace('.pkl', '').replace('_', ' ').title()}...")
+    
     if is_streamlit_cloud:
         try:
-            # First load the standard vectorizer to use with all models
-            standard_vectorizer = load_standard_vectorizer()
+            # First load the standard vectorizer
+            vectorizer = load_standard_vectorizer()
             
-            # Now try to load the model
-            with spinner_container.container():
-                st.markdown("⏳ Loading model...")
+            # Download and load the model file
+            model_content = download_file_from_github(model_filename)
             
-            model_content = download_file_from_github(model_filename, silent=True)
-            model = joblib.load(io.BytesIO(model_content))
+            # Use temporary file for safer joblib loading
+            with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+                temp_file.write(model_content)
+                temp_path = temp_file.name
+            
+            # Load the model from the temp file
+            model = joblib.load(temp_path)
+            
+            # Clean up temp file
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
             
             # Check if this model is compatible with our vectorizer
-            if is_model_compatible(model, standard_vectorizer):
-                return model, standard_vectorizer
+            if is_model_compatible(model, vectorizer):
+                operation_status.success("Model loaded successfully!")
+                time.sleep(0.5)
+                operation_status.empty()
+                return model, vectorizer
             else:
+                # Model is not compatible with the vectorizer
+                operation_status.warning("Original model not compatible. Creating adapted model...")
+                
                 # Determine which model type based on filename
                 model_type = "logistic_regression"  # default
                 if "svm" in model_filename.lower():
@@ -506,16 +424,23 @@ def load_traditional_model(model_filename):
                     model_type = "random_forest"
                 
                 # Train a local model of the same type
-                local_model = train_local_model(model_type)
+                local_model, local_vectorizer = train_local_model(model_type)
                 
-                if local_model:
-                    return local_model, standard_vectorizer
-                else:
-                    return create_fallback_model()
+                operation_status.success("Adapted model ready!")
+                time.sleep(0.5)
+                operation_status.empty()
+                return local_model, local_vectorizer
                 
-        except Exception:
-            # Fallback to a simple LogisticRegression model
-            return create_fallback_model()
+        except Exception as e:
+            # Something went wrong - create a fallback model
+            operation_status.error(f"Error: {type(e).__name__}")
+            operation_status.info("Creating fallback model...")
+            fallback_model, fallback_vectorizer = create_fallback_model()
+            
+            operation_status.success("Ready with fallback model")
+            time.sleep(0.5)
+            operation_status.empty()
+            return fallback_model, fallback_vectorizer
     else:
         # Local environment
         try:
@@ -523,17 +448,36 @@ def load_traditional_model(model_filename):
             model = joblib.load(model_path)
             vectorizer = joblib.load(vectorizer_path)
             
-            # Verify model is properly fitted
+            # Verify model is compatible
             if is_model_compatible(model, vectorizer):
+                operation_status.success("Model loaded successfully!")
+                time.sleep(0.5)
+                operation_status.empty()
                 return model, vectorizer
             else:
-                return create_fallback_model()
+                # Create a fallback model
+                operation_status.warning("Model not compatible with vectorizer")
+                operation_status.info("Creating fallback model...")
+                fallback_model, fallback_vectorizer = create_fallback_model()
+                
+                operation_status.success("Ready with fallback model")
+                time.sleep(0.5)
+                operation_status.empty()
+                return fallback_model, fallback_vectorizer
         except Exception:
-            # Fallback to a simple LogisticRegression model
-            return create_fallback_model()
+            # Create a fallback model
+            operation_status.error("Error loading model")
+            operation_status.info("Creating fallback model...")
+            fallback_model, fallback_vectorizer = create_fallback_model()
+            
+            operation_status.success("Ready with fallback model")
+            time.sleep(0.5)
+            operation_status.empty()
+            return fallback_model, fallback_vectorizer
 
+# Create a simple fallback model for when other models fail
 def create_fallback_model():
-    """Create a simple fallback model for when the main model fails to load"""
+    """Create a simple fallback model"""
     # Create a simple vectorizer
     vectorizer = TfidfVectorizer(max_features=1000)
     
@@ -565,6 +509,7 @@ def create_fallback_model():
 
 # Prediction function
 def predict_with_traditional(text, model, vectorizer):
+    """Make a prediction using the model"""
     try:
         # Preprocess text
         text = preprocess_text(text)
@@ -599,6 +544,15 @@ def predict_with_traditional(text, model, vectorizer):
         prediction = 0 if random.random() < 0.55 else 1
         confidence = 0.51  # Low confidence since this is a fallback
         return prediction, confidence
+
+# Initialize session state
+if 'model' not in st.session_state or 'vectorizer' not in st.session_state:
+    st.session_state['model'] = None
+    st.session_state['vectorizer'] = None
+    st.session_state['current_model_name'] = None
+
+if 'text_input' not in st.session_state:
+    st.session_state.text_input = ""
 
 # App UI
 # Create a header with custom styling
@@ -654,13 +608,6 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
     
-    # Format model names to be more readable
-    def format_model_name(filename):
-        name = filename.replace('.pkl', '').replace('_', ' ').title()
-        if '+' in name:
-            name = name.replace(' + ', '</br>+ ')
-        return name
-    
     # Model selection in sidebar
     selected_model = st.selectbox(
         "Select Model:",
@@ -668,12 +615,18 @@ with st.sidebar:
         format_func=lambda x: x.replace('_', ' ').replace('.pkl', '').title()
     )
 
-# Load the selected model (with spinner hidden in the function)
-model, vectorizer = load_traditional_model(selected_model)
-
-# Initialize session state for text input
-if 'text_input' not in st.session_state:
-    st.session_state.text_input = ""
+# Load model if needed
+if st.session_state['current_model_name'] != selected_model:
+    # Load the selected model
+    model, vectorizer = load_model_by_name(selected_model)
+    # Store in session state
+    st.session_state['model'] = model
+    st.session_state['vectorizer'] = vectorizer
+    st.session_state['current_model_name'] = selected_model
+else:
+    # Use model from session state
+    model = st.session_state['model']
+    vectorizer = st.session_state['vectorizer']
 
 # Text input - with better spacing and styling
 text_input = st.text_area("Enter Reddit post text:", value=st.session_state.text_input, height=150)
@@ -777,3 +730,4 @@ st.markdown("""
     <p class="credit-tag">Created with machine learning & Streamlit</p>
 </div>
 """, unsafe_allow_html=True) 
+
